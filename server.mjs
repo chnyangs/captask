@@ -8,6 +8,7 @@ import {
   existsSync,
   watchFile,
   renameSync,
+  unlinkSync,
 } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
@@ -996,6 +997,11 @@ app.post("/api/auth/setup", async (req, reply) => {
     salt,
   };
   saveAuthData(authData);
+  // Regenerate TOTP secret with correct username (delete unverified old one)
+  if (!totpEnabled && existsSync(TOTP_FILE)) {
+    unlinkSync(TOTP_FILE);
+  }
+  loadTOTP();
   const sessionToken = issueSessionToken();
   return { ok: true, sessionToken };
 });

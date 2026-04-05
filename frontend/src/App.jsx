@@ -1162,16 +1162,16 @@ export default function App() {
     [send, activeProject, projects]
   );
 
-  // Clear expired session on auth error
+  // Clear expired session on auth error (but not during TOTP setup)
   useEffect(() => {
-    if (authError && sessionToken) {
+    if (authError && sessionToken && !showTotpSetup) {
       localStorage.removeItem("captask_session");
       setSessionToken("");
     }
-  }, [authError, sessionToken]);
+  }, [authError, sessionToken, showTotpSetup]);
 
   // Conditional return AFTER all hooks
-  if (!sessionToken || authError) {
+  if (!sessionToken || (authError && !showTotpSetup)) {
     return <LoginScreen onLogin={handleLogin} />;
   }
 

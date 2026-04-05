@@ -16,7 +16,9 @@
       "Bash(grep -c \"token\" /home/k1y9/project/captask/frontend/dist/assets/*.js)",
       "Bash(grep -c \"username\" /home/k1y9/project/captask/frontend/dist/assets/*.js)",
       "Bash(docker exec:*)",
-      "Bash(docker volume:*)"
+      "Bash(docker volume:*)",
+      "Bash(docker run:*)",
+      "Bash(ls ~/.claude/.credentials* ~/.claude/auth* ~/.claude/config*)"
     ]
   }
 }

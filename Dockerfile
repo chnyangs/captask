@@ -1,7 +1,7 @@
-FROM node:22-slim
+FROM node:22
 
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+# Install Claude Code CLI and verify
+RUN npm install -g @anthropic-ai/claude-code && which claude
 
 WORKDIR /app
 
