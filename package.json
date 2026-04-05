@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"node server.mjs\" \"cd frontend && npx vite --port 5173\"",
+    "setup": "npm install && cd frontend && npm install",
     "build": "cd frontend && npx vite build",
     "start": "node server.mjs",
-    "deploy": "npm run build && npm run start",
+    "deploy": "npm run setup && npm run build && npm run start",
     "restart": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null; npm run deploy",
     "stop": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null && echo 'Stopped' || echo 'Not running'"
   },

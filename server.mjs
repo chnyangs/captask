@@ -47,6 +47,10 @@ function loadConfig() {
   return raw;
 }
 
+if (!existsSync(PROJECTS_FILE)) {
+  writeFileSync(PROJECTS_FILE, JSON.stringify({ projects: [] }, null, 2) + "\n");
+  console.log("Created empty projects.json — add projects via the web UI");
+}
 let config = loadConfig();
 let projectsMap = new Map(config.projects.map((p) => [p.id, p]));
 
