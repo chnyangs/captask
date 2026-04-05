@@ -13,6 +13,8 @@ services:
     environment:
       - CAPTASK_TOKEN=${CAPTASK_TOKEN:-}
       - CAPTASK_DATA_DIR=/app/data
+      - CAPTASK_PROJECT_ROOT=/projects
+      - CAPTASK_HOST_PROJECT_ROOT=${HOME}/project
       - PORT=3456
 
 volumes:

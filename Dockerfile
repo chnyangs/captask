@@ -15,8 +15,9 @@ RUN cd frontend && npm install
 COPY frontend/ ./frontend/
 RUN cd frontend && npx vite build
 
-# Copy server
+# Copy server + default projects config
 COPY server.mjs ./
+COPY projects.json ./projects.default.json
 
 # Data directory for sessions, messages, totp, projects
 RUN mkdir -p /app/data

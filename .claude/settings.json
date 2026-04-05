@@ -11,7 +11,12 @@
       "Bash(curl -s -X POST http://localhost:3456/api/auth/setup -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"test123\"}')",
       "Bash(curl -s -X POST http://localhost:3456/api/auth/login -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"test123\"}')",
       "Bash(git checkout:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git pull:*)",
+      "Bash(grep -c \"token\" /home/k1y9/project/captask/frontend/dist/assets/*.js)",
+      "Bash(grep -c \"username\" /home/k1y9/project/captask/frontend/dist/assets/*.js)",
+      "Bash(docker exec:*)",
+      "Bash(docker volume:*)"
     ]
   }
 }

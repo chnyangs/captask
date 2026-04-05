@@ -51,8 +51,25 @@ function loadConfig() {
 }
 
 if (!existsSync(PROJECTS_FILE)) {
-  writeFileSync(PROJECTS_FILE, JSON.stringify({ projects: [] }, null, 2) + "\n");
-  console.log("Created empty projects.json — add projects via the web UI");
+  // Try to seed from bundled default (Docker builds include projects.default.json)
+  const defaultFile = join(__dirname, "projects.default.json");
+  if (existsSync(defaultFile)) {
+    const raw = JSON.parse(readFileSync(defaultFile, "utf-8"));
+    const projectRoot = process.env.CAPTASK_PROJECT_ROOT; // e.g. "/projects"
+    const hostRoot = process.env.CAPTASK_HOST_PROJECT_ROOT; // e.g. "/home/user/project"
+    if (projectRoot && hostRoot) {
+      for (const p of raw.projects || []) {
+        if (p.path?.startsWith(hostRoot)) {
+          p.path = projectRoot + p.path.slice(hostRoot.length);
+        }
+      }
+    }
+    writeFileSync(PROJECTS_FILE, JSON.stringify(raw, null, 2) + "\n");
+    console.log(`Seeded projects.json from default (${raw.projects?.length || 0} projects)`);
+  } else {
+    writeFileSync(PROJECTS_FILE, JSON.stringify({ projects: [] }, null, 2) + "\n");
+    console.log("Created empty projects.json — add projects via the web UI");
+  }
 }
 let config = loadConfig();
 let projectsMap = new Map(config.projects.map((p) => [p.id, p]));
@@ -193,7 +210,7 @@ function loadTOTP() {
   // Generate new secret
   const totp = new OTPAuth.TOTP({
     issuer: "CapTask",
-    label: process.env.CAPTASK_USER || "admin",
+    label: authData?.username || "admin",
     algorithm: "SHA1",
     digits: 6,
     period: 30,
@@ -211,7 +228,7 @@ loadTOTP();
 function getTOTP() {
   return new OTPAuth.TOTP({
     issuer: "CapTask",
-    label: process.env.CAPTASK_USER || "admin",
+    label: authData?.username || "admin",
     algorithm: "SHA1",
     digits: 6,
     period: 30,

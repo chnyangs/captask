@@ -13,8 +13,9 @@
     "restart": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null; npm run deploy",
     "stop": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null && echo 'Stopped' || echo 'Not running'",
     "docker:build": "docker build -t captask .",
-    "docker:run": "docker compose up -d",
+    "docker:run": "docker compose up -d --build",
     "docker:stop": "docker compose down",
+    "docker:reset": "docker compose down -v && docker compose build --no-cache && docker compose up -d",
     "docker:logs": "docker compose logs -f"
   },
   "keywords": [],
