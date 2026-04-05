@@ -6,3 +6,5 @@ frontend/dist/
 projects.json
 .totp-secret.json
 .messages.json
+.auth.json
+backup-*/

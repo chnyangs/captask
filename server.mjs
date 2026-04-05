@@ -20,23 +20,59 @@ import QRCode from "qrcode";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ═══════════════════════════════════════════════════════
+// Config — all tunables from env vars with sensible defaults
+// ═══════════════════════════════════════════════════════
+
+const DATA_DIR = process.env.CAPTASK_DATA_DIR || __dirname;
+const SESSION_TTL_MS = parseInt(process.env.CAPTASK_SESSION_TTL_MS || String(30 * 24 * 60 * 60 * 1000), 10);
+const SESSION_TOKEN_TTL = parseInt(process.env.CAPTASK_TOKEN_TTL_MS || String(24 * 60 * 60 * 1000), 10);
+const MAX_PROMPT_LENGTH = parseInt(process.env.CAPTASK_MAX_PROMPT || "100000", 10);
+const MAX_BUFFER_SIZE = parseInt(process.env.CAPTASK_MAX_BUFFER || String(10 * 1024 * 1024), 10);
+const TASK_TIMEOUT_MS = parseInt(process.env.CAPTASK_TASK_TIMEOUT_MS || String(30 * 60 * 1000), 10);
+const MAX_STREAM_CHUNK = parseInt(process.env.CAPTASK_MAX_STREAM_CHUNK || String(1024 * 1024), 10);
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.CAPTASK_RATE_WINDOW_MS || "10000", 10);
+const RATE_LIMIT_MAX_TASKS = parseInt(process.env.CAPTASK_RATE_MAX_TASKS || "5", 10);
+const MAX_OUTPUT_BUFFER = parseInt(process.env.CAPTASK_MAX_OUTPUT_BUFFER || "200", 10);
+const MAX_MESSAGES_PER_SESSION = parseInt(process.env.CAPTASK_MAX_MESSAGES || "200", 10);
+
+// ═══════════════════════════════════════════════════════
+// Structured logger
+// ═══════════════════════════════════════════════════════
+
+const LOG_FORMAT = process.env.CAPTASK_LOG_FORMAT || "text"; // "json" or "text"
+
+function log(level, msg, meta = {}) {
+  const entry = { ts: new Date().toISOString(), level, msg, ...meta };
+  if (LOG_FORMAT === "json") {
+    const stream = level === "error" || level === "fatal" ? process.stderr : process.stdout;
+    stream.write(JSON.stringify(entry) + "\n");
+  } else {
+    const prefix = `[${entry.ts}] ${level.toUpperCase()}`;
+    const extra = Object.keys(meta).length ? " " + JSON.stringify(meta) : "";
+    const stream = level === "error" || level === "fatal" ? process.stderr : process.stdout;
+    stream.write(`${prefix}: ${msg}${extra}\n`);
+  }
+}
+
+log.info = (msg, meta) => log("info", msg, meta);
+log.warn = (msg, meta) => log("warn", msg, meta);
+log.error = (msg, meta) => log("error", msg, meta);
+log.fatal = (msg, meta) => log("fatal", msg, meta);
+
+// ═══════════════════════════════════════════════════════
 // #14 — Preflight: check claude binary is available
 // ═══════════════════════════════════════════════════════
 
 try {
   execSync("which claude", { stdio: "ignore" });
 } catch {
-  console.error(
-    "FATAL: 'claude' binary not found in PATH. Install Claude Code first."
-  );
+  log.fatal("'claude' binary not found in PATH. Install Claude Code first.");
   process.exit(1);
 }
 
 // ═══════════════════════════════════════════════════════
 // Project config (hot-reloadable) — #9 validate on load
 // ═══════════════════════════════════════════════════════
-
-const DATA_DIR = process.env.CAPTASK_DATA_DIR || __dirname;
 const PROJECTS_FILE = join(DATA_DIR, "projects.json");
 
 function loadConfig() {
@@ -52,25 +88,8 @@ function loadConfig() {
 }
 
 if (!existsSync(PROJECTS_FILE)) {
-  // Try to seed from bundled default (Docker builds include projects.default.json)
-  const defaultFile = join(__dirname, "projects.default.json");
-  if (existsSync(defaultFile)) {
-    const raw = JSON.parse(readFileSync(defaultFile, "utf-8"));
-    const projectRoot = process.env.CAPTASK_PROJECT_ROOT; // e.g. "/projects"
-    const hostRoot = process.env.CAPTASK_HOST_PROJECT_ROOT; // e.g. "/home/user/project"
-    if (projectRoot && hostRoot) {
-      for (const p of raw.projects || []) {
-        if (p.path?.startsWith(hostRoot)) {
-          p.path = projectRoot + p.path.slice(hostRoot.length);
-        }
-      }
-    }
-    writeFileSync(PROJECTS_FILE, JSON.stringify(raw, null, 2) + "\n");
-    console.log(`Seeded projects.json from default (${raw.projects?.length || 0} projects)`);
-  } else {
-    writeFileSync(PROJECTS_FILE, JSON.stringify({ projects: [] }, null, 2) + "\n");
-    console.log("Created empty projects.json — add projects via the web UI");
-  }
+  writeFileSync(PROJECTS_FILE, JSON.stringify({ projects: [] }, null, 2) + "\n");
+  log.info("Created empty projects.json — add projects via the web UI");
 }
 let config = loadConfig();
 let projectsMap = new Map(config.projects.map((p) => [p.id, p]));
@@ -79,9 +98,9 @@ watchFile(PROJECTS_FILE, { interval: 2000 }, () => {
   try {
     config = loadConfig();
     projectsMap = new Map(config.projects.map((p) => [p.id, p]));
-    console.log("Reloaded projects.json");
+    log.info("Reloaded projects.json");
   } catch (err) {
-    console.error("Failed to reload projects.json:", err.message);
+    log.error("Failed to reload projects.json", { error: err.message });
   }
 });
 
@@ -91,7 +110,7 @@ function saveConfig() {
     writeFileSync(tmpFile, JSON.stringify(config, null, 2) + "\n");
     renameSync(tmpFile, PROJECTS_FILE);
   } catch (err) {
-    console.error("Failed to save projects.json:", err.message);
+    log.error("Failed to save projects.json", { error: err.message });
     throw err;
   }
   projectsMap = new Map(config.projects.map((p) => [p.id, p]));
@@ -281,7 +300,6 @@ function verifyAuth(username, password, totpCode) {
 // ═══════════════════════════════════════════════════════
 
 const SESSION_FILE = join(DATA_DIR, ".sessions.json");
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // #11 — 30 day TTL
 
 function loadSessionStore() {
   try {
@@ -320,13 +338,11 @@ function loadSessionStore() {
       return store;
     }
   } catch (err) {
-    console.error("Failed to load .sessions.json:", err.message);
+    log.error("Failed to load .sessions.json", { error: err.message });
     try {
       if (existsSync(SESSION_FILE)) {
         renameSync(SESSION_FILE, SESSION_FILE + ".bak");
-        console.log(
-          "Backed up corrupt .sessions.json to .sessions.json.bak"
-        );
+        log.warn("Backed up corrupt .sessions.json to .sessions.json.bak");
       }
     } catch {
       // ignore
@@ -349,7 +365,7 @@ function saveSessionStore() {
     lastSaveError = null;
   } catch (err) {
     lastSaveError = err.message;
-    console.error("Failed to save sessions:", err.message);
+    log.error("Failed to save sessions", { error: err.message });
     try {
       if (existsSync(tmpFile))
         writeFileSync(tmpFile, "", { flag: "w" });
@@ -378,7 +394,7 @@ function purgeExpiredSessions() {
     }
   }
   if (purged > 0) {
-    console.log(`Purged ${purged} expired sessions (>30 days)`);
+    log.info("Purged expired sessions", { count: purged });
     saveSessionStore();
   }
 }
@@ -466,7 +482,6 @@ function getSessionList(projectId) {
 // ═══════════════════════════════════════════════════════
 
 const MESSAGES_FILE = join(DATA_DIR, ".messages.json");
-const MAX_MESSAGES_PER_SESSION = 200;
 
 function loadMessageStore() {
   try {
@@ -474,7 +489,7 @@ function loadMessageStore() {
       return JSON.parse(readFileSync(MESSAGES_FILE, "utf-8"));
     }
   } catch (err) {
-    console.error("Failed to load .messages.json:", err.message);
+    log.error("Failed to load .messages.json", { error: err.message });
     try {
       if (existsSync(MESSAGES_FILE)) {
         renameSync(MESSAGES_FILE, MESSAGES_FILE + ".bak");
@@ -498,7 +513,7 @@ function saveMessageStore() {
     lastMessageSaveError = null;
   } catch (err) {
     lastMessageSaveError = err.message;
-    console.error("Failed to save messages:", err.message);
+    log.error("Failed to save messages", { error: err.message });
     // Notify all connected sockets
     for (const [sock] of socketSessionMap) {
       safeSend(sock, { type: "save_error", message: err.message });
@@ -564,13 +579,6 @@ function broadcastToSession(projectId, sessionId, data, excludeSocket) {
 // ═══════════════════════════════════════════════════════
 
 const projectRunningTasks = new Map(); // Map<projectId, Map<sessionId, Set<taskId>>>
-const MAX_PROMPT_LENGTH = 100_000;
-const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // #2 — 10MB buffer cap
-const TASK_TIMEOUT_MS = 30 * 60 * 1000; // #1 — 30 min timeout
-const MAX_STREAM_CHUNK = 1024 * 1024; // #15 — 1MB per stream msg
-const RATE_LIMIT_WINDOW_MS = 10_000; // #6
-const RATE_LIMIT_MAX_TASKS = 5; // #6
-const MAX_OUTPUT_BUFFER = 200; // max buffered messages for reattach
 
 // ═══════════════════════════════════════════════════════
 // Global task registry — tasks survive socket disconnects
@@ -885,9 +893,7 @@ try {
   ).trim();
   if (result) {
     const pids = result.split("\n").filter(Boolean);
-    console.warn(
-      `WARNING: Found ${pids.length} existing claude --print process(es): PIDs ${pids.join(", ")}`
-    );
+    log.warn("Found existing claude --print processes", { count: pids.length, pids });
   }
 } catch {
   // pgrep not available
@@ -897,7 +903,7 @@ try {
 // Fastify setup
 // ═══════════════════════════════════════════════════════
 
-const app = Fastify({ logger: { level: "warn" } });
+const app = Fastify({ logger: false });
 
 await app.register(fastifyStatic, {
   root: join(__dirname, "frontend", "dist"),
@@ -960,7 +966,6 @@ app.get("/api/auth/status", async () => ({
 
 // Session tokens — issued after TOTP verification, used for WS auth
 const sessionTokens = new Map(); // sessionToken -> { createdAt }
-const SESSION_TOKEN_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 function issueSessionToken() {
   const st = randomBytes(32).toString("hex");
@@ -1443,12 +1448,31 @@ let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log("Shutting down...");
+  log.info("Shutting down...");
+
+  // Kill all running claude tasks
+  let tasksKilled = 0;
+  for (const [taskId, task] of globalTasks) {
+    if (task.child && !task.child.killed) {
+      task.child.kill("SIGTERM");
+      tasksKilled++;
+    }
+  }
+  if (tasksKilled > 0) {
+    log.info("Sent SIGTERM to running tasks", { count: tasksKilled });
+  }
+
   saveSessionStore();
   saveMessageStore();
 
   const forceTimer = setTimeout(() => {
-    console.error("Graceful shutdown timed out, forcing exit");
+    // Force kill any remaining tasks
+    for (const [, task] of globalTasks) {
+      if (task.child && !task.child.killed) {
+        task.child.kill("SIGKILL");
+      }
+    }
+    log.error("Graceful shutdown timed out, forcing exit");
     process.exit(1);
   }, 5000);
 
@@ -1468,5 +1492,5 @@ process.on("SIGINT", shutdown);
 const host = process.env.CAPTASK_HOST || "0.0.0.0";
 const port = process.env.PORT || 3456;
 await app.listen({ port, host });
-console.log(`CapTask server running on http://${host}:${port}`);
-console.log(authData ? `Account: ${authData.username}` : "No account configured — create one via the web UI");
+log.info(`CapTask server running`, { host, port: Number(port) });
+log.info(authData ? `Account: ${authData.username}` : "No account configured — create one via the web UI");
