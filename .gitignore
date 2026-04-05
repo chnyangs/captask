@@ -4,3 +4,5 @@ frontend/dist/
 .sessions.json
 .env
 projects.json
+.totp-secret.json
+.messages.json
