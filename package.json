@@ -11,7 +11,11 @@
     "start": "node server.mjs",
     "deploy": "npm run setup && npm run build && npm run start",
     "restart": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null; npm run deploy",
-    "stop": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null && echo 'Stopped' || echo 'Not running'"
+    "stop": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null && echo 'Stopped' || echo 'Not running'",
+    "docker:build": "docker build -t captask .",
+    "docker:run": "docker compose up -d",
+    "docker:stop": "docker compose down",
+    "docker:logs": "docker compose logs -f"
   },
   "keywords": [],
   "author": "",
@@ -20,7 +24,9 @@
     "@anthropic-ai/claude-code": "^2.1.91",
     "@fastify/static": "^9.0.0",
     "@fastify/websocket": "^11.2.0",
-    "fastify": "^5.8.4"
+    "fastify": "^5.8.4",
+    "otpauth": "^9.5.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

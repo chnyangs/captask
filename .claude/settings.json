@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Read(//Users/xyan0559/.claude/**)"
+      "Read(//Users/xyan0559/.claude/**)",
+      "Bash(node server.mjs)",
+      "Bash(curl -s http://localhost:3456/health)"
     ]
   }
 }
