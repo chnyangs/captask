@@ -13,6 +13,8 @@ import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { randomBytes, randomUUID } from "crypto";
 import { homedir } from "os";
+import * as OTPAuth from "otpauth";
+import QRCode from "qrcode";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -33,7 +35,8 @@ try {
 // Project config (hot-reloadable) — #9 validate on load
 // ═══════════════════════════════════════════════════════
 
-const PROJECTS_FILE = join(__dirname, "projects.json");
+const DATA_DIR = process.env.CAPTASK_DATA_DIR || __dirname;
+const PROJECTS_FILE = join(DATA_DIR, "projects.json");
 
 function loadConfig() {
   const raw = JSON.parse(readFileSync(PROJECTS_FILE, "utf-8"));
@@ -139,17 +142,97 @@ function getProjectsList() {
 }
 
 // ═══════════════════════════════════════════════════════
-// Auth
+// Auth — Token + TOTP
 // ═══════════════════════════════════════════════════════
 
 const AUTH_TOKEN =
   process.env.CAPTASK_TOKEN || randomBytes(32).toString("hex");
 
+const TOTP_FILE = join(DATA_DIR, ".totp-secret.json");
+let totpSecret = null;
+let totpEnabled = false;
+
+function loadTOTP() {
+  try {
+    if (existsSync(TOTP_FILE)) {
+      const data = JSON.parse(readFileSync(TOTP_FILE, "utf-8"));
+      if (data.secret && data.verified) {
+        totpSecret = data.secret;
+        totpEnabled = true;
+        return;
+      }
+      if (data.secret && !data.verified) {
+        // Setup started but not verified yet
+        totpSecret = data.secret;
+        totpEnabled = false;
+        return;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  // Generate new secret
+  const totp = new OTPAuth.TOTP({
+    issuer: "CapTask",
+    label: process.env.CAPTASK_USER || "admin",
+    algorithm: "SHA1",
+    digits: 6,
+    period: 30,
+  });
+  totpSecret = totp.secret.base32;
+  totpEnabled = false;
+  writeFileSync(
+    TOTP_FILE,
+    JSON.stringify({ secret: totpSecret, verified: false }, null, 2)
+  );
+}
+
+loadTOTP();
+
+function getTOTP() {
+  return new OTPAuth.TOTP({
+    issuer: "CapTask",
+    label: process.env.CAPTASK_USER || "admin",
+    algorithm: "SHA1",
+    digits: 6,
+    period: 30,
+    secret: OTPAuth.Secret.fromBase32(totpSecret),
+  });
+}
+
+function verifyTOTPCode(code) {
+  const totp = getTOTP();
+  const delta = totp.validate({ token: code, window: 1 });
+  return delta !== null;
+}
+
+function confirmTOTPSetup(code) {
+  if (verifyTOTPCode(code)) {
+    totpEnabled = true;
+    writeFileSync(
+      TOTP_FILE,
+      JSON.stringify({ secret: totpSecret, verified: true }, null, 2)
+    );
+    return true;
+  }
+  return false;
+}
+
+function verifyAuth(token, totpCode) {
+  if (token !== AUTH_TOKEN) return { ok: false, reason: "Invalid token" };
+  if (totpEnabled) {
+    if (!totpCode) return { ok: false, reason: "TOTP code required" };
+    if (!verifyTOTPCode(totpCode))
+      return { ok: false, reason: "Invalid TOTP code" };
+  }
+  return { ok: true };
+}
+
 // ═══════════════════════════════════════════════════════
 // Session persistence — #3 atomic writes, #4 error notify
 // ═══════════════════════════════════════════════════════
 
-const SESSION_FILE = join(__dirname, ".sessions.json");
+const SESSION_FILE = join(DATA_DIR, ".sessions.json");
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // #11 — 30 day TTL
 
 function loadSessionStore() {
@@ -334,7 +417,7 @@ function getSessionList(projectId) {
 // Message persistence — server-side message store
 // ═══════════════════════════════════════════════════════
 
-const MESSAGES_FILE = join(__dirname, ".messages.json");
+const MESSAGES_FILE = join(DATA_DIR, ".messages.json");
 const MAX_MESSAGES_PER_SESSION = 200;
 
 function loadMessageStore() {
@@ -535,6 +618,19 @@ function runClaude(project, prompt, taskId, socket) {
   if (proj.skipPermissions !== false) {
     args.push("--dangerously-skip-permissions");
   }
+
+  // Project memory: inject system prompt for CLAUDE.md awareness
+  const memoryPrompt = [
+    "You have a project memory file at CLAUDE.md in the project root.",
+    "At the START of each task, read CLAUDE.md if it exists to understand project context, conventions, and prior decisions.",
+    "At the END of each task, update CLAUDE.md with any important new findings:",
+    "- Architectural decisions made",
+    "- Bugs found and how they were fixed",
+    "- Key patterns or conventions discovered",
+    "- Warnings for future work",
+    "Keep CLAUDE.md concise (under 200 lines). Update, don't append blindly.",
+  ].join(" ");
+  args.push("--append-system-prompt", memoryPrompt);
 
   const claudeSessionId = getActiveClaudeSessionId(proj.id);
   if (claudeSessionId) {
@@ -761,11 +857,96 @@ app.get("/health", async () => ({
   sessionSaveError: lastSaveError,
 }));
 
+// TOTP setup endpoint — returns QR code for scanning
+app.get("/api/totp/setup", async (req, reply) => {
+  const token = req.query.token;
+  if (token !== AUTH_TOKEN) {
+    reply.code(401);
+    return { error: "Unauthorized" };
+  }
+  if (totpEnabled) {
+    return { enabled: true, message: "TOTP already configured" };
+  }
+  const totp = getTOTP();
+  const uri = totp.toString();
+  const qrDataUrl = await QRCode.toDataURL(uri);
+  return { enabled: false, qr: qrDataUrl, uri, secret: totpSecret };
+});
+
+// TOTP verify — confirm setup or validate login
+app.post("/api/totp/verify", async (req, reply) => {
+  const { token, code } = req.body || {};
+  if (token !== AUTH_TOKEN) {
+    reply.code(401);
+    return { error: "Unauthorized" };
+  }
+  if (!code || typeof code !== "string") {
+    reply.code(400);
+    return { error: "Missing code" };
+  }
+  if (!totpEnabled) {
+    // First-time setup confirmation
+    if (confirmTOTPSetup(code)) {
+      return { ok: true, message: "TOTP enabled successfully" };
+    }
+    reply.code(400);
+    return { error: "Invalid code — scan the QR code first, then enter the 6-digit code" };
+  }
+  // Normal verification
+  if (verifyTOTPCode(code)) {
+    return { ok: true };
+  }
+  reply.code(400);
+  return { error: "Invalid TOTP code" };
+});
+
+// Auth status — tells frontend if TOTP is required
+app.get("/api/auth/status", async () => ({
+  totpRequired: totpEnabled,
+  totpSetupNeeded: !totpEnabled && !!totpSecret,
+}));
+
+// Session tokens — issued after TOTP verification, used for WS auth
+const sessionTokens = new Map(); // sessionToken -> { createdAt }
+const SESSION_TOKEN_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+function issueSessionToken() {
+  const st = randomBytes(32).toString("hex");
+  sessionTokens.set(st, { createdAt: Date.now() });
+  // Cleanup old tokens
+  for (const [k, v] of sessionTokens) {
+    if (Date.now() - v.createdAt > SESSION_TOKEN_TTL) sessionTokens.delete(k);
+  }
+  return st;
+}
+
+function validateSessionToken(st) {
+  const entry = sessionTokens.get(st);
+  if (!entry) return false;
+  if (Date.now() - entry.createdAt > SESSION_TOKEN_TTL) {
+    sessionTokens.delete(st);
+    return false;
+  }
+  return true;
+}
+
+// Update /api/totp/verify to issue session token
+app.post("/api/auth/login", async (req, reply) => {
+  const { token, totpCode } = req.body || {};
+  const auth = verifyAuth(token, totpCode);
+  if (!auth.ok) {
+    reply.code(401);
+    return { error: auth.reason };
+  }
+  const sessionToken = issueSessionToken();
+  return { ok: true, sessionToken };
+});
+
 app.get("/ws", { websocket: true }, (socket, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const token = url.searchParams.get("token");
+  const sessionToken = url.searchParams.get("session");
 
-  if (token !== AUTH_TOKEN) {
+  if (!sessionToken || !validateSessionToken(sessionToken)) {
     socket.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
     socket.close(4001, "Unauthorized");
     return;

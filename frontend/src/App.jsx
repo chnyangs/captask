@@ -109,31 +109,175 @@ function TypingIndicator() {
   );
 }
 
-function TokenScreen({ onSubmit }) {
-  const [value, setValue] = useState("");
+function LoginScreen({ onLogin }) {
+  const [token, setToken] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [authStatus, setAuthStatus] = useState(null);
+  const [qrData, setQrData] = useState(null);
+  const [setupMode, setSetupMode] = useState(false);
+
+  // Check auth status on mount
+  useEffect(() => {
+    fetch("/api/auth/status")
+      .then((r) => r.json())
+      .then(setAuthStatus)
+      .catch(() => setAuthStatus({ totpRequired: false }));
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    if (!token.trim()) return;
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: token.trim(),
+          totpCode: totpCode.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.sessionToken) {
+        onLogin(data.sessionToken);
+      } else {
+        setError(data.error || "Login failed");
+      }
+    } catch {
+      setError("Connection failed");
+    }
+    setLoading(false);
+  };
+
+  const handleSetupTOTP = async () => {
+    if (!token.trim()) {
+      setError("Enter token first");
+      return;
+    }
+    setError("");
+    try {
+      const res = await fetch(
+        `/api/totp/setup?token=${encodeURIComponent(token.trim())}`
+      );
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+        return;
+      }
+      if (data.enabled) {
+        setError("TOTP already configured");
+        return;
+      }
+      setQrData(data);
+      setSetupMode(true);
+    } catch {
+      setError("Connection failed");
+    }
+  };
+
+  const handleConfirmSetup = async (e) => {
+    e.preventDefault();
+    if (!totpCode.trim()) return;
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/totp/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: token.trim(),
+          code: totpCode.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setSetupMode(false);
+        setQrData(null);
+        setAuthStatus({ totpRequired: true });
+        setError("");
+        setTotpCode("");
+      } else {
+        setError(data.error || "Verification failed");
+      }
+    } catch {
+      setError("Connection failed");
+    }
+    setLoading(false);
+  };
+
+  const needsTOTP = authStatus?.totpRequired;
+  const canSetupTOTP = authStatus?.totpSetupNeeded;
+
   return (
     <div className="token-screen">
       <div className="token-logo">C</div>
       <h1>CapTask</h1>
-      <p>Enter your auth token to connect</p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          onSubmit(value.trim());
-        }}
-      >
-        <input
-          type="password"
-          className="input"
-          placeholder="Auth token"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          autoFocus
-        />
-        <button className="send-btn" type="submit" disabled={!value.trim()}>
-          Connect
-        </button>
-      </form>
+
+      {setupMode && qrData ? (
+        <>
+          <p>Scan with MS Authenticator</p>
+          <img src={qrData.qr} alt="TOTP QR Code" className="totp-qr" />
+          <form className="login-form" onSubmit={handleConfirmSetup}>
+            <input
+              className="input"
+              placeholder="Enter 6-digit code to confirm"
+              value={totpCode}
+              onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              autoFocus
+            />
+            <button
+              className="send-btn"
+              type="submit"
+              disabled={totpCode.length !== 6 || loading}
+            >
+              {loading ? "..." : "Verify"}
+            </button>
+          </form>
+        </>
+      ) : (
+        <>
+          <p>{needsTOTP ? "Token + Authenticator code" : "Enter your auth token"}</p>
+          <form className="login-form" onSubmit={handleLogin}>
+            <input
+              type="password"
+              className="input"
+              placeholder="Auth token"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              autoFocus
+            />
+            {needsTOTP && (
+              <input
+                className="input"
+                placeholder="6-digit code"
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+              />
+            )}
+            <button
+              className="send-btn"
+              type="submit"
+              disabled={!token.trim() || (needsTOTP && totpCode.length !== 6) || loading}
+            >
+              {loading ? "..." : "Connect"}
+            </button>
+          </form>
+          {canSetupTOTP && !needsTOTP && (
+            <button className="totp-setup-link" onClick={handleSetupTOTP}>
+              Set up 2FA (Authenticator)
+            </button>
+          )}
+        </>
+      )}
+
+      {error && <p className="login-error">{error}</p>}
     </div>
   );
 }
@@ -460,19 +604,14 @@ function NavDrawer({
 // --- Main App ---
 
 export default function App() {
-  const [token, setToken] = useState(() => {
-    // Check both old and new key for backwards compat
-    return (
-      localStorage.getItem("captask_token") ||
-      localStorage.getItem("captask_device_token") ||
-      ""
-    );
-  });
+  const [sessionToken, setSessionToken] = useState(
+    () => localStorage.getItem("captask_session") || ""
+  );
 
   const {
     connected, authError, projects, sessions, saveError, setSaveError,
     send, subscribe, on, setExpectedProject,
-  } = useWebSocket(token);
+  } = useWebSocket(sessionToken);
   const [activeProject, setActiveProject] = useState(null);
   const [messagesMap, setMessagesMap] = useState({});
   const [input, setInput] = useState(
@@ -559,14 +698,14 @@ export default function App() {
     return unsub;
   }, [on]);
 
-  const handleToken = (t) => {
-    localStorage.setItem("captask_token", t);
-    setToken(t);
+  const handleLogin = (st) => {
+    localStorage.setItem("captask_session", st);
+    setSessionToken(st);
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("captask_token");
-    setToken("");
+    localStorage.removeItem("captask_session");
+    setSessionToken("");
   };
 
   // Auto-select first project
@@ -897,8 +1036,8 @@ export default function App() {
   );
 
   // Conditional return AFTER all hooks
-  if (!token || authError) {
-    return <TokenScreen onSubmit={handleToken} />;
+  if (!sessionToken || authError) {
+    return <LoginScreen onLogin={handleLogin} />;
   }
 
   const activeProjectName =

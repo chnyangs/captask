@@ -42,7 +42,7 @@ export default function useWebSocket(token) {
     function connect() {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
-        `${protocol}//${location.host}/ws?token=${encodeURIComponent(token)}`
+        `${protocol}//${location.host}/ws?session=${encodeURIComponent(token)}`
       );
       wsRef.current = ws;
 

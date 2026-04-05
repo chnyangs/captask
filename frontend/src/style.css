@@ -618,12 +618,45 @@ html, body, #root {
   font-size: 13px;
 }
 
-.token-screen form {
+.login-form {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   width: 100%;
-  max-width: 360px;
+  max-width: 320px;
   padding: 0 16px;
+}
+
+.login-form .send-btn {
+  align-self: stretch;
+  min-height: 40px;
+}
+
+.login-error {
+  color: #f87171;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.totp-qr {
+  width: 200px;
+  height: 200px;
+  border-radius: 12px;
+  margin: 8px 0;
+}
+
+.totp-setup-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 8px;
+  text-decoration: underline;
+}
+
+.totp-setup-link:hover {
+  opacity: 0.8;
 }
 
 /* ── Markdown in assistant bubbles ── */
