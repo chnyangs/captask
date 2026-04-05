@@ -432,7 +432,7 @@ function NavDrawer({
   onRenameSession,
   onAddProject,
   onRemoveProject,
-  running,
+  isSessionRunning,
 }) {
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
@@ -527,7 +527,7 @@ function NavDrawer({
                       {isActive && projSessions.length > 0 && (
                         <span className="drawer-badge">{projSessions.length}</span>
                       )}
-                      {isActive && running && (
+                      {isActive && projSessions.some((s) => isSessionRunning(p.id, s.id)) && (
                         <span className="drawer-running-dot" />
                       )}
                     </span>
@@ -559,7 +559,7 @@ function NavDrawer({
                         className={`drawer-item session ${s.id === activeSessId ? "active" : ""}`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (s.id !== activeSessId && !running) {
+                          if (s.id !== activeSessId) {
                             onSwitchSession(s.id);
                             onClose();
                           }
@@ -583,6 +583,9 @@ function NavDrawer({
                             <div className="drawer-item-info">
                               <span className="drawer-item-name">
                                 {s.name}
+                                {isSessionRunning(activeProject, s.id) && (
+                                  <span className="drawer-running-dot" />
+                                )}
                               </span>
                               <span className="drawer-item-date">
                                 {formatTime(s.createdAt)}
@@ -619,7 +622,6 @@ function NavDrawer({
                     <button
                       className="drawer-new-session"
                       onClick={onNewSession}
-                      disabled={running}
                     >
                       + New Session
                     </button>
@@ -741,16 +743,24 @@ export default function App() {
   const [input, setInput] = useState(
     () => localStorage.getItem("captask_draft") || ""
   );
-  const [running, setRunning] = useState(false);
-  const [activeTools, setActiveTools] = useState([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [generatingQP, setGeneratingQP] = useState(null);
-  const [taskStartedAt, setTaskStartedAt] = useState(null); // Fix #2
-  const [elapsed, setElapsed] = useState(0); // Fix #2
-  const [lastActivity, setLastActivity] = useState(null); // Fix #2
+  const [elapsed, setElapsed] = useState(0);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
-  const currentTaskRef = useRef(null);
+
+  // Per-session task state: Map<key, { running, activeTools, taskStartedAt, lastActivity, taskId }>
+  const taskStateRef = useRef(new Map());
+  const [taskStateVersion, setTaskStateVersion] = useState(0);
+  const bumpTaskState = useCallback(() => setTaskStateVersion((v) => v + 1), []);
+  const getTaskState = useCallback((key) =>
+    taskStateRef.current.get(key) || { running: false, activeTools: [], taskStartedAt: null, lastActivity: null, taskId: null },
+  []);
+  const setTaskStateForKey = useCallback((key, patch) => {
+    const prev = taskStateRef.current.get(key) || { running: false, activeTools: [], taskStartedAt: null, lastActivity: null, taskId: null };
+    taskStateRef.current.set(key, { ...prev, ...patch });
+    bumpTaskState();
+  }, [bumpTaskState]);
 
   // Active session ID for current project
   const activeSessionId =
@@ -759,6 +769,13 @@ export default function App() {
   // Messages keyed by project+session
   const currentKey = msgKey(activeProject, activeSessionId);
   const messages = activeProject ? messagesMap[currentKey] || [] : [];
+
+  // Derived task state for current session
+  const currentTaskState = getTaskState(currentKey);
+  const running = currentTaskState.running;
+  const activeTools = currentTaskState.activeTools;
+  const lastActivity = currentTaskState.lastActivity;
+  const taskStartedAt = currentTaskState.taskStartedAt;
 
   // Load messages from server when session changes
   useEffect(() => {
@@ -890,40 +907,43 @@ export default function App() {
     if (!running) inputRef.current?.focus();
   }, [running]);
 
-  // Fix #2: Elapsed timer while task is running
+  // Elapsed timer for current session's running task
   useEffect(() => {
-    if (!running || !taskStartedAt) {
+    const ts = getTaskState(currentKey);
+    if (!ts.running || !ts.taskStartedAt) {
       setElapsed(0);
       return;
     }
     const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - taskStartedAt) / 1000));
+      setElapsed(Math.floor((Date.now() - ts.taskStartedAt) / 1000));
     }, 1000);
     return () => clearInterval(interval);
-  }, [running, taskStartedAt]);
+  }, [currentKey, taskStateVersion, getTaskState]);
 
   // Offline queue — resend pending prompt on reconnect
   const offlineQueueRef = useRef(null);
 
-  // On reconnect: reattach or replay offline queue
+  // On reconnect: reattach running tasks or replay offline queue
   useEffect(() => {
-    if (connected && currentTaskRef.current) {
-      send({ type: "reattach", taskId: currentTaskRef.current });
-    } else if (connected) {
-      setRunning(false);
-      setActiveTools([]);
-      // Replay offline queue
+    if (!connected) return;
+    let anyReattached = false;
+    for (const [, state] of taskStateRef.current.entries()) {
+      if (state.running && state.taskId) {
+        send({ type: "reattach", taskId: state.taskId });
+        anyReattached = true;
+      }
+    }
+    if (!anyReattached) {
+      // No running tasks — clear stale state
+      taskStateRef.current.clear();
+      bumpTaskState();
       if (offlineQueueRef.current) {
         const queued = offlineQueueRef.current;
         offlineQueueRef.current = null;
-        setTimeout(() => {
-          setInput(queued);
-          // Auto-send after brief delay
-          // User will see it in input and can edit before Enter
-        }, 100);
+        setTimeout(() => setInput(queued), 100);
       }
     }
-  }, [connected, send]);
+  }, [connected, send, bumpTaskState]);
 
   const updateMessages = useCallback(
     (key, updater) => {
@@ -949,136 +969,92 @@ export default function App() {
   }, [activeSessionId]);
 
   const doSend = useCallback((prompt) => {
-    if (!prompt || !activeProject || running) return;
+    if (!prompt || !activeProject) return;
 
     const sessionId = activeSessionId || sessions.active;
     if (!sessionId) {
-      // Still no session — shouldn't happen, but bail
       pendingPromptRef.current = null;
       return;
     }
 
-    // #5 — Unique ID to avoid collision across restarts
+    const key = msgKey(activeProject, sessionId);
+    // Guard: this session already has a running task
+    if (getTaskState(key).running) return;
+
     const taskId = "t-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-    // #12 — Frontend prompt length check
     if (prompt.length > MAX_PROMPT_LENGTH) {
-      updateMessages(msgKey(activeProject, activeSessionId), (prev) => [
+      updateMessages(key, (prev) => [
         ...prev,
-        {
-          role: "error",
-          text: `Prompt too long (${prompt.length} chars, max ${MAX_PROMPT_LENGTH})`,
-        },
+        { role: "error", text: `Prompt too long (${prompt.length} chars, max ${MAX_PROMPT_LENGTH})` },
       ]);
       return;
     }
-    currentTaskRef.current = taskId;
-    setRunning(true);
-    setActiveTools([]);
-    setTaskStartedAt(Date.now());
-    setLastActivity("Starting...");
 
-    const key = msgKey(activeProject, activeSessionId);
+    setTaskStateForKey(key, { running: true, activeTools: [], taskStartedAt: Date.now(), lastActivity: "Starting...", taskId });
 
     updateMessages(key, (prev) => [
       ...prev,
       { role: "user", text: prompt },
     ]);
 
+    const capturedKey = key;
+    const capturedProjectId = activeProject;
     send({ type: "task", projectId: activeProject, prompt, taskId });
 
-    const capturedKey = key;
+    const clearTask = { running: false, activeTools: [], taskStartedAt: null, lastActivity: null, taskId: null };
+
     const unsub = subscribe(taskId, (msg) => {
       switch (msg.type) {
         case "task_stream":
-          setActiveTools([]);
-          setLastActivity("Responding...");
+          setTaskStateForKey(capturedKey, { activeTools: [], lastActivity: "Responding..." });
           updateMessages(capturedKey, (prev) => {
             const last = prev[prev.length - 1];
             if (last?.stream && last.taskId === msg.taskId) {
-              return [
-                ...prev.slice(0, -1),
-                { ...last, text: last.text + msg.text },
-              ];
+              return [...prev.slice(0, -1), { ...last, text: last.text + msg.text }];
             }
-            return [
-              ...prev,
-              {
-                role: "assistant",
-                text: msg.text,
-                stream: true,
-                taskId: msg.taskId,
-              },
-            ];
+            return [...prev, { role: "assistant", text: msg.text, stream: true, taskId: msg.taskId }];
           });
           break;
         case "task_tool":
-          setActiveTools(msg.tools || []);
-          setLastActivity(msg.tools?.[0]?.name || "Working...");
+          setTaskStateForKey(capturedKey, { activeTools: msg.tools || [], lastActivity: msg.tools?.[0]?.name || "Working..." });
           updateMessages(capturedKey, (prev) => {
             const last = prev[prev.length - 1];
             if (last?.role === "tools" && last.taskId === msg.taskId) {
-              return [
-                ...prev.slice(0, -1),
-                { ...last, tools: [...last.tools, ...msg.tools] },
-              ];
+              return [...prev.slice(0, -1), { ...last, tools: [...last.tools, ...msg.tools] }];
             }
-            return [
-              ...prev,
-              { role: "tools", tools: msg.tools, taskId: msg.taskId },
-            ];
+            return [...prev, { role: "tools", tools: msg.tools, taskId: msg.taskId }];
           });
           break;
         case "task_done":
           if (msg.result) {
-            updateMessages(capturedKey, (prev) => [
-              ...prev,
-              { role: "assistant", text: msg.result, taskId },
-            ]);
+            updateMessages(capturedKey, (prev) => [...prev, { role: "assistant", text: msg.result, taskId }]);
           }
-          setActiveTools([]);
-          setRunning(false);
-          setTaskStartedAt(null);
-          setLastActivity(null);
-          currentTaskRef.current = null;
-          // Refresh session list (server may have auto-created a session)
-          send({ type: "list_sessions", projectId: activeProject });
+          setTaskStateForKey(capturedKey, clearTask);
+          send({ type: "list_sessions", projectId: capturedProjectId });
           unsub();
           break;
         case "task_error":
-          updateMessages(capturedKey, (prev) => [
-            ...prev,
-            { role: "error", text: `Error: ${msg.message}`, taskId },
-          ]);
-          setActiveTools([]);
-          setRunning(false);
-          setTaskStartedAt(null);
-          setLastActivity(null);
-          currentTaskRef.current = null;
+          updateMessages(capturedKey, (prev) => [...prev, { role: "error", text: `Error: ${msg.message}`, taskId }]);
+          setTaskStateForKey(capturedKey, clearTask);
           unsub();
           break;
         case "task_cancelled":
-          updateMessages(capturedKey, (prev) => [
-            ...prev,
-            { role: "error", text: "Task cancelled", taskId },
-          ]);
-          setActiveTools([]);
-          setRunning(false);
-          setTaskStartedAt(null);
-          setLastActivity(null);
-          currentTaskRef.current = null;
+          updateMessages(capturedKey, (prev) => [...prev, { role: "error", text: "Task cancelled", taskId }]);
+          setTaskStateForKey(capturedKey, clearTask);
           unsub();
           break;
       }
     });
-  }, [activeProject, activeSessionId, running, send, subscribe, updateMessages, sessions]);
+  }, [activeProject, activeSessionId, send, subscribe, updateMessages, sessions, getTaskState, setTaskStateForKey]);
 
   const handleSend = useCallback(() => {
     const prompt = input.trim();
-    if (!prompt || !activeProject || running) return;
+    if (!prompt || !activeProject) return;
+    const key = msgKey(activeProject, activeSessionId);
+    if (getTaskState(key).running) return;
 
     if (!activeSessionId) {
-      // No session yet — create one first, queue the prompt
       pendingPromptRef.current = prompt;
       setInput("");
       send({ type: "new_session", projectId: activeProject });
@@ -1087,25 +1063,24 @@ export default function App() {
 
     setInput("");
     doSend(prompt);
-  }, [input, activeProject, activeSessionId, running, send, doSend]);
+  }, [input, activeProject, activeSessionId, send, doSend, getTaskState]);
 
   const handleCancel = useCallback(() => {
-    if (currentTaskRef.current) {
-      send({ type: "cancel", taskId: currentTaskRef.current });
+    const ts = getTaskState(currentKey);
+    if (ts.taskId) {
+      send({ type: "cancel", taskId: ts.taskId });
     }
-  }, [send]);
+  }, [currentKey, send, getTaskState]);
 
   const handleNewSession = useCallback(() => {
-    if (running) return;
     send({ type: "new_session", projectId: activeProject });
-  }, [running, activeProject, send]);
+  }, [activeProject, send]);
 
   const handleSwitchSession = useCallback(
     (sessionId) => {
-      if (running) return;
       send({ type: "switch_session", projectId: activeProject, sessionId });
     },
-    [running, activeProject, send]
+    [activeProject, send]
   );
 
   const handleDeleteSession = useCallback(
@@ -1129,12 +1104,9 @@ export default function App() {
 
   const handleProjectChange = useCallback(
     (newProjectId) => {
-      if (running) {
-        if (!confirm("A task is running. Switch project anyway?")) return;
-      }
       setActiveProject(newProjectId);
     },
-    [running]
+    []
   );
 
   const handleKeyDown = (e) => {
@@ -1162,16 +1134,8 @@ export default function App() {
     [send, activeProject, projects]
   );
 
-  // Clear expired session on auth error (but not during TOTP setup)
-  useEffect(() => {
-    if (authError && sessionToken && !showTotpSetup) {
-      localStorage.removeItem("captask_session");
-      setSessionToken("");
-    }
-  }, [authError, sessionToken, showTotpSetup]);
-
   // Conditional return AFTER all hooks
-  if (!sessionToken || (authError && !showTotpSetup)) {
+  if (!sessionToken || authError) {
     return <LoginScreen onLogin={handleLogin} />;
   }
 
@@ -1203,7 +1167,7 @@ export default function App() {
         onRenameSession={handleRenameSession}
         onAddProject={handleAddProject}
         onRemoveProject={handleRemoveProject}
-        running={running}
+        isSessionRunning={(projectId, sessionId) => getTaskState(msgKey(projectId, sessionId)).running}
       />
 
       <header className="header">
@@ -1224,7 +1188,6 @@ export default function App() {
           <button
             className="new-chat-btn"
             onClick={handleNewSession}
-            disabled={running}
             title="New session"
           >
             New

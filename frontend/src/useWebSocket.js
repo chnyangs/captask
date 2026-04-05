@@ -36,8 +36,12 @@ export default function useWebSocket(token) {
   useEffect(() => {
     if (!token) return;
 
+    // Reset auth error when starting a new connection with a new token
+    setAuthError(false);
+
     let reconnectTimer;
     let attempt = 0;
+    let disposed = false; // prevent stale onclose from setting authError
 
     function connect() {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -47,6 +51,7 @@ export default function useWebSocket(token) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (disposed) return;
         attempt = 0;
         listenersRef.current.clear();
         setConnected(true);
@@ -54,6 +59,7 @@ export default function useWebSocket(token) {
       };
 
       ws.onclose = (e) => {
+        if (disposed) return;
         setConnected(false);
         if (e.code === 4001) {
           setAuthError(true);
@@ -118,6 +124,7 @@ export default function useWebSocket(token) {
 
     connect();
     return () => {
+      disposed = true;
       clearTimeout(reconnectTimer);
       wsRef.current?.close();
     };

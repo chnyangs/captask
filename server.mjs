@@ -239,7 +239,7 @@ function getTOTP() {
 
 function verifyTOTPCode(code) {
   const totp = getTOTP();
-  const delta = totp.validate({ token: code, window: 1 });
+  const delta = totp.validate({ token: code, window: 2 });
   return delta !== null;
 }
 
@@ -563,7 +563,7 @@ function broadcastToSession(projectId, sessionId, data, excludeSocket) {
 // Concurrency & limits
 // ═══════════════════════════════════════════════════════
 
-const projectRunningTasks = new Map();
+const projectRunningTasks = new Map(); // Map<projectId, Map<sessionId, Set<taskId>>>
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // #2 — 10MB buffer cap
 const TASK_TIMEOUT_MS = 30 * 60 * 1000; // #1 — 30 min timeout
@@ -640,7 +640,7 @@ function taskSend(taskId, data) {
   }
 }
 
-function runClaude(project, prompt, taskId, socket) {
+function runClaude(project, prompt, taskId, socket, sessionId) {
   // #9 — Snapshot project config at task start
   const proj = { ...project };
 
@@ -705,9 +705,13 @@ function runClaude(project, prompt, taskId, socket) {
   globalTasks.set(taskId, taskEntry);
 
   if (!projectRunningTasks.has(proj.id)) {
-    projectRunningTasks.set(proj.id, new Set());
+    projectRunningTasks.set(proj.id, new Map());
   }
-  projectRunningTasks.get(proj.id).add(taskId);
+  const projMap = projectRunningTasks.get(proj.id);
+  if (!projMap.has(sessionId)) {
+    projMap.set(sessionId, new Set());
+  }
+  projMap.get(sessionId).add(taskId);
 
   let buffer = "";
   let killed = false;
@@ -773,7 +777,10 @@ function runClaude(project, prompt, taskId, socket) {
 
   function cleanup() {
     clearTimeout(timeoutTimer);
-    projectRunningTasks.get(proj.id)?.delete(taskId);
+    const projMap = projectRunningTasks.get(proj.id);
+    if (projMap) {
+      projMap.get(sessionId)?.delete(taskId);
+    }
     // Don't delete from globalTasks yet — keep for reattach
     // Clean up after 5 minutes of completion
     setTimeout(() => globalTasks.delete(taskId), 5 * 60 * 1000);
@@ -1101,19 +1108,20 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       }
       taskTimestamps.push(now);
 
-      const running = projectRunningTasks.get(projectId);
-      if (running && running.size > 0) {
+      // Persist user message
+      const sessId = getActiveSession(projectId)?.id;
+
+      // Check if this session already has a running task
+      const projTasks = projectRunningTasks.get(projectId);
+      const sessionTasks = projTasks?.get(sessId);
+      if (sessionTasks && sessionTasks.size > 0) {
         safeSend(socket, {
           type: "task_error",
           taskId,
-          message:
-            "A task is already running for this project. Wait or cancel it.",
+          message: "A task is already running for this session. Wait or cancel it.",
         });
         return;
       }
-
-      // Persist user message
-      const sessId = getActiveSession(projectId)?.id;
       if (sessId) {
         appendMessage(projectId, sessId, {
           type: "user",
@@ -1130,7 +1138,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       }
 
       safeSend(socket, { type: "task_start", taskId, projectId });
-      runClaude(project, prompt, taskId, socket);
+      runClaude(project, prompt, taskId, socket, sessId);
     }
 
     // ── Cancel ──
