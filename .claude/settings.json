@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/xyan0559/.claude/**)"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "captask",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.mjs",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"node server.mjs\" \"cd frontend && npx vite --port 5173\"",
+    "build": "cd frontend && npx vite build",
+    "start": "node server.mjs",
+    "deploy": "npm run build && npm run start",
+    "restart": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null; npm run deploy",
+    "stop": "lsof -ti:${PORT:-3456} | xargs kill 2>/dev/null && echo 'Stopped' || echo 'Not running'"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^2.1.91",
+    "@fastify/static": "^9.0.0",
+    "@fastify/websocket": "^11.2.0",
+    "fastify": "^5.8.4"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
