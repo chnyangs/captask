@@ -110,25 +110,48 @@ function TypingIndicator() {
 }
 
 function LoginScreen({ onLogin }) {
-  const [token, setToken] = useState("");
+  const [step, setStep] = useState("loading"); // loading | setup | login | totp | totp-setup
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [authStatus, setAuthStatus] = useState(null);
   const [qrData, setQrData] = useState(null);
-  const [setupMode, setSetupMode] = useState(false);
+  const [tempSession, setTempSession] = useState(null); // for TOTP setup after login
 
-  // Check auth status on mount
   useEffect(() => {
     fetch("/api/auth/status")
       .then((r) => r.json())
-      .then(setAuthStatus)
-      .catch(() => setAuthStatus({ totpRequired: false }));
+      .then((s) => setStep(s.accountConfigured ? "login" : "setup"))
+      .catch(() => setStep("login"));
   }, []);
 
+  // Step: create account
+  const handleSetup = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/auth/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        onLogin(data.sessionToken, true); // new account → prompt TOTP setup
+      } else {
+        setError(data.error || "Setup failed");
+      }
+    } catch {
+      setError("Connection failed");
+    }
+    setLoading(false);
+  };
+
+  // Step: login with username + password
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!token.trim()) return;
     setError("");
     setLoading(true);
     try {
@@ -136,13 +159,17 @@ function LoginScreen({ onLogin }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          token: token.trim(),
+          username: username.trim(),
+          password,
           totpCode: totpCode.trim() || undefined,
         }),
       });
       const data = await res.json();
       if (data.ok && data.sessionToken) {
-        onLogin(data.sessionToken);
+        onLogin(data.sessionToken, true); // no TOTP yet → prompt setup
+      } else if (data.totpRequired) {
+        setStep("totp");
+        setError("");
       } else {
         setError(data.error || "Login failed");
       }
@@ -152,55 +179,26 @@ function LoginScreen({ onLogin }) {
     setLoading(false);
   };
 
-  const handleSetupTOTP = async () => {
-    if (!token.trim()) {
-      setError("Enter token first");
-      return;
-    }
-    setError("");
-    try {
-      const res = await fetch(
-        `/api/totp/setup?token=${encodeURIComponent(token.trim())}`
-      );
-      const data = await res.json();
-      if (data.error) {
-        setError(data.error);
-        return;
-      }
-      if (data.enabled) {
-        setError("TOTP already configured");
-        return;
-      }
-      setQrData(data);
-      setSetupMode(true);
-    } catch {
-      setError("Connection failed");
-    }
-  };
-
-  const handleConfirmSetup = async (e) => {
+  // Step: enter TOTP code (credentials already verified)
+  const handleTOTP = async (e) => {
     e.preventDefault();
-    if (!totpCode.trim()) return;
     setError("");
     setLoading(true);
     try {
-      const res = await fetch("/api/totp/verify", {
+      const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          token: token.trim(),
-          code: totpCode.trim(),
+          username: username.trim(),
+          password,
+          totpCode: totpCode.trim(),
         }),
       });
       const data = await res.json();
-      if (data.ok) {
-        setSetupMode(false);
-        setQrData(null);
-        setAuthStatus({ totpRequired: true });
-        setError("");
-        setTotpCode("");
+      if (data.ok && data.sessionToken) {
+        onLogin(data.sessionToken);
       } else {
-        setError(data.error || "Verification failed");
+        setError(data.error || "Invalid code");
       }
     } catch {
       setError("Connection failed");
@@ -208,22 +206,90 @@ function LoginScreen({ onLogin }) {
     setLoading(false);
   };
 
-  const needsTOTP = authStatus?.totpRequired;
-  const canSetupTOTP = authStatus?.totpSetupNeeded;
+  if (step === "loading") {
+    return (
+      <div className="token-screen">
+        <div className="token-logo">C</div>
+        <h1>CapTask</h1>
+        <p>Loading...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="token-screen">
       <div className="token-logo">C</div>
       <h1>CapTask</h1>
 
-      {setupMode && qrData ? (
+      {step === "setup" && (
         <>
-          <p>Scan with MS Authenticator</p>
-          <img src={qrData.qr} alt="TOTP QR Code" className="totp-qr" />
-          <form className="login-form" onSubmit={handleConfirmSetup}>
+          <p>Create your account</p>
+          <form className="login-form" onSubmit={handleSetup}>
             <input
               className="input"
-              placeholder="Enter 6-digit code to confirm"
+              placeholder="Username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              className="input"
+              placeholder="Password (min 6 chars)"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+            <button
+              className="send-btn"
+              type="submit"
+              disabled={username.trim().length < 2 || password.length < 6 || loading}
+            >
+              {loading ? "..." : "Create Account"}
+            </button>
+          </form>
+        </>
+      )}
+
+      {step === "login" && (
+        <>
+          <p>Sign in</p>
+          <form className="login-form" onSubmit={handleLogin}>
+            <input
+              className="input"
+              placeholder="Username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              className="input"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+            />
+            <button
+              className="send-btn"
+              type="submit"
+              disabled={!username.trim() || !password || loading}
+            >
+              {loading ? "..." : "Sign In"}
+            </button>
+          </form>
+        </>
+      )}
+
+      {step === "totp" && (
+        <>
+          <p>Enter Authenticator code</p>
+          <form className="login-form" onSubmit={handleTOTP}>
+            <input
+              className="input totp-input"
+              placeholder="000000"
               value={totpCode}
               onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
               inputMode="numeric"
@@ -238,42 +304,9 @@ function LoginScreen({ onLogin }) {
               {loading ? "..." : "Verify"}
             </button>
           </form>
-        </>
-      ) : (
-        <>
-          <p>{needsTOTP ? "Token + Authenticator code" : "Enter your auth token"}</p>
-          <form className="login-form" onSubmit={handleLogin}>
-            <input
-              type="password"
-              className="input"
-              placeholder="Auth token"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              autoFocus
-            />
-            {needsTOTP && (
-              <input
-                className="input"
-                placeholder="6-digit code"
-                value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-              />
-            )}
-            <button
-              className="send-btn"
-              type="submit"
-              disabled={!token.trim() || (needsTOTP && totpCode.length !== 6) || loading}
-            >
-              {loading ? "..." : "Connect"}
-            </button>
-          </form>
-          {canSetupTOTP && !needsTOTP && (
-            <button className="totp-setup-link" onClick={handleSetupTOTP}>
-              Set up 2FA (Authenticator)
-            </button>
-          )}
+          <button className="totp-setup-link" onClick={() => { setStep("login"); setTotpCode(""); }}>
+            Back
+          </button>
         </>
       )}
 
@@ -601,12 +634,103 @@ function NavDrawer({
   );
 }
 
+function TotpSetupScreen({ sessionToken, onDone }) {
+  const [step, setStep] = useState("loading"); // loading | scan | done
+  const [qrData, setQrData] = useState(null);
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/totp/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionToken }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.enabled) {
+          onDone(); // already set up
+        } else {
+          setQrData(data);
+          setStep("scan");
+        }
+      })
+      .catch(() => setError("Connection failed"));
+  }, [sessionToken, onDone]);
+
+  const handleVerify = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/totp/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionToken, code: code.trim() }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setStep("done");
+        setTimeout(onDone, 1500);
+      } else {
+        setError(data.error || "Invalid code");
+      }
+    } catch {
+      setError("Connection failed");
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="token-screen">
+      <div className="token-logo">C</div>
+      <h1>Set up 2FA</h1>
+
+      {step === "loading" && <p>Loading...</p>}
+
+      {step === "scan" && qrData && (
+        <>
+          <p>Scan with MS Authenticator</p>
+          <img src={qrData.qr} alt="TOTP QR" className="totp-qr" />
+          <form className="login-form" onSubmit={handleVerify}>
+            <input
+              className="input totp-input"
+              placeholder="000000"
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              autoFocus
+            />
+            <button
+              className="send-btn"
+              type="submit"
+              disabled={code.length !== 6 || loading}
+            >
+              {loading ? "..." : "Verify & Enable"}
+            </button>
+          </form>
+          <button className="totp-setup-link" onClick={onDone}>
+            Skip for now
+          </button>
+        </>
+      )}
+
+      {step === "done" && <p>2FA enabled! Redirecting...</p>}
+
+      {error && <p className="login-error">{error}</p>}
+    </div>
+  );
+}
+
 // --- Main App ---
 
 export default function App() {
   const [sessionToken, setSessionToken] = useState(
     () => localStorage.getItem("captask_session") || ""
   );
+  const [showTotpSetup, setShowTotpSetup] = useState(false);
 
   const {
     connected, authError, projects, sessions, saveError, setSaveError,
@@ -698,9 +822,12 @@ export default function App() {
     return unsub;
   }, [on]);
 
-  const handleLogin = (st) => {
+  const handleLogin = (st, needsTotpSetup) => {
     localStorage.setItem("captask_session", st);
     setSessionToken(st);
+    if (needsTotpSetup) {
+      setShowTotpSetup(true);
+    }
   };
 
   const handleLogout = () => {
@@ -1035,9 +1162,26 @@ export default function App() {
     [send, activeProject, projects]
   );
 
+  // Clear expired session on auth error
+  useEffect(() => {
+    if (authError && sessionToken) {
+      localStorage.removeItem("captask_session");
+      setSessionToken("");
+    }
+  }, [authError, sessionToken]);
+
   // Conditional return AFTER all hooks
   if (!sessionToken || authError) {
     return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  if (showTotpSetup) {
+    return (
+      <TotpSetupScreen
+        sessionToken={sessionToken}
+        onDone={() => setShowTotpSetup(false)}
+      />
+    );
   }
 
   const activeProjectName =

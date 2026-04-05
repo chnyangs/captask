@@ -11,7 +11,7 @@ import {
 } from "fs";
 import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
-import { randomBytes, randomUUID } from "crypto";
+import { randomBytes, randomUUID, createHmac } from "crypto";
 import { homedir } from "os";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
@@ -142,11 +142,30 @@ function getProjectsList() {
 }
 
 // ═══════════════════════════════════════════════════════
-// Auth — Token + TOTP
+// Auth — Username/Password + TOTP
 // ═══════════════════════════════════════════════════════
 
-const AUTH_TOKEN =
-  process.env.CAPTASK_TOKEN || randomBytes(32).toString("hex");
+const AUTH_FILE = join(DATA_DIR, ".auth.json");
+
+function hashPwd(password, salt) {
+  return createHmac("sha256", salt).update(password).digest("hex");
+}
+
+function loadAuth() {
+  try {
+    if (existsSync(AUTH_FILE)) {
+      return JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function saveAuthData(data) {
+  writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
+}
+
+let authData = loadAuth();
+// authData: { username, passwordHash, salt } or null (needs setup)
 
 const TOTP_FILE = join(DATA_DIR, ".totp-secret.json");
 let totpSecret = null;
@@ -218,10 +237,21 @@ function confirmTOTPSetup(code) {
   return false;
 }
 
-function verifyAuth(token, totpCode) {
-  if (token !== AUTH_TOKEN) return { ok: false, reason: "Invalid token" };
+function verifyCredentials(username, password) {
+  if (!authData) return { ok: false, reason: "Account not set up" };
+  if (username !== authData.username)
+    return { ok: false, reason: "Invalid username or password" };
+  const hash = hashPwd(password, authData.salt);
+  if (hash !== authData.passwordHash)
+    return { ok: false, reason: "Invalid username or password" };
+  return { ok: true };
+}
+
+function verifyAuth(username, password, totpCode) {
+  const cred = verifyCredentials(username, password);
+  if (!cred.ok) return cred;
   if (totpEnabled) {
-    if (!totpCode) return { ok: false, reason: "TOTP code required" };
+    if (!totpCode) return { ok: false, reason: "totp_required" };
     if (!verifyTOTPCode(totpCode))
       return { ok: false, reason: "Invalid TOTP code" };
   }
@@ -858,11 +888,12 @@ app.get("/health", async () => ({
 }));
 
 // TOTP setup endpoint — returns QR code for scanning
-app.get("/api/totp/setup", async (req, reply) => {
-  const token = req.query.token;
-  if (token !== AUTH_TOKEN) {
+// TOTP setup — requires valid session token (already logged in)
+app.post("/api/totp/setup", async (req, reply) => {
+  const { sessionToken: st } = req.body || {};
+  if (!st || !validateSessionToken(st)) {
     reply.code(401);
-    return { error: "Unauthorized" };
+    return { error: "Login first" };
   }
   if (totpEnabled) {
     return { enabled: true, message: "TOTP already configured" };
@@ -870,38 +901,34 @@ app.get("/api/totp/setup", async (req, reply) => {
   const totp = getTOTP();
   const uri = totp.toString();
   const qrDataUrl = await QRCode.toDataURL(uri);
-  return { enabled: false, qr: qrDataUrl, uri, secret: totpSecret };
+  return { enabled: false, qr: qrDataUrl, uri };
 });
 
 // TOTP verify — confirm setup or validate login
 app.post("/api/totp/verify", async (req, reply) => {
-  const { token, code } = req.body || {};
-  if (token !== AUTH_TOKEN) {
+  const { sessionToken: st, code } = req.body || {};
+  if (!st || !validateSessionToken(st)) {
     reply.code(401);
-    return { error: "Unauthorized" };
+    return { error: "Login first" };
   }
   if (!code || typeof code !== "string") {
     reply.code(400);
     return { error: "Missing code" };
   }
   if (!totpEnabled) {
-    // First-time setup confirmation
     if (confirmTOTPSetup(code)) {
       return { ok: true, message: "TOTP enabled successfully" };
     }
     reply.code(400);
-    return { error: "Invalid code — scan the QR code first, then enter the 6-digit code" };
-  }
-  // Normal verification
-  if (verifyTOTPCode(code)) {
-    return { ok: true };
+    return { error: "Invalid code — scan the QR code first" };
   }
   reply.code(400);
-  return { error: "Invalid TOTP code" };
+  return { error: "TOTP already configured" };
 });
 
 // Auth status — tells frontend if TOTP is required
 app.get("/api/auth/status", async () => ({
+  accountConfigured: !!authData,
   totpRequired: totpEnabled,
   totpSetupNeeded: !totpEnabled && !!totpSecret,
 }));
@@ -930,11 +957,41 @@ function validateSessionToken(st) {
   return true;
 }
 
-// Update /api/totp/verify to issue session token
+// Create account (first time only)
+app.post("/api/auth/setup", async (req, reply) => {
+  if (authData) {
+    reply.code(400);
+    return { error: "Account already configured" };
+  }
+  const { username, password } = req.body || {};
+  if (!username || typeof username !== "string" || username.trim().length < 2) {
+    reply.code(400);
+    return { error: "Username must be at least 2 characters" };
+  }
+  if (!password || typeof password !== "string" || password.length < 6) {
+    reply.code(400);
+    return { error: "Password must be at least 6 characters" };
+  }
+  const salt = randomBytes(16).toString("hex");
+  authData = {
+    username: username.trim(),
+    passwordHash: hashPwd(password, salt),
+    salt,
+  };
+  saveAuthData(authData);
+  const sessionToken = issueSessionToken();
+  return { ok: true, sessionToken };
+});
+
+// Login — step 1: verify credentials, step 2: verify TOTP if enabled
 app.post("/api/auth/login", async (req, reply) => {
-  const { token, totpCode } = req.body || {};
-  const auth = verifyAuth(token, totpCode);
+  const { username, password, totpCode } = req.body || {};
+  const auth = verifyAuth(username, password, totpCode);
   if (!auth.ok) {
+    if (auth.reason === "totp_required") {
+      // Credentials correct but need TOTP — tell frontend to show TOTP input
+      return { ok: false, totpRequired: true };
+    }
     reply.code(401);
     return { error: auth.reason };
   }
@@ -1381,4 +1438,4 @@ const host = process.env.CAPTASK_HOST || "0.0.0.0";
 const port = process.env.PORT || 3456;
 await app.listen({ port, host });
 console.log(`CapTask server running on http://${host}:${port}`);
-console.log(`Auth token: ${AUTH_TOKEN}`);
+console.log(authData ? `Account: ${authData.username}` : "No account configured — create one via the web UI");

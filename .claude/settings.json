@@ -3,7 +3,13 @@
     "allow": [
       "Read(//Users/xyan0559/.claude/**)",
       "Bash(node server.mjs)",
-      "Bash(curl -s http://localhost:3456/health)"
+      "Bash(curl -s http://localhost:3456/health)",
+      "Bash(CAPTASK_TOKEN=test node server.mjs)",
+      "Bash(curl -s http://localhost:3456/api/auth/status)",
+      "Bash(curl -s -X POST http://localhost:3456/api/auth/login -H 'Content-Type: application/json' -d '{\"token\":\"test\"}')",
+      "Bash(node -e ':*)",
+      "Bash(curl -s -X POST http://localhost:3456/api/auth/setup -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"test123\"}')",
+      "Bash(curl -s -X POST http://localhost:3456/api/auth/login -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"test123\"}')"
     ]
   }
 }

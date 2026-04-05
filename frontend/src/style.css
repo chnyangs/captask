@@ -659,6 +659,14 @@ html, body, #root {
   opacity: 0.8;
 }
 
+.totp-input {
+  text-align: center;
+  font-size: 24px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  letter-spacing: 8px;
+  padding: 12px;
+}
+
 /* ── Markdown in assistant bubbles ── */
 .markdown {
   font-size: 14px;
